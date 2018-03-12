@@ -2185,42 +2185,28 @@ object Stream {
     /** Send chunks through `sink`, allowing up to `maxQueued` pending _segments_ before blocking `s`. */
     def observeAsync(maxQueued: Int)(sink: Sink[F, O])(implicit F: Effect[F],
                                                        ec: ExecutionContext): Stream[F, O] =
-      Stream.eval(async.semaphore[F](maxQueued)).flatMap { guard =>
-        Stream.eval(async.unboundedQueue[F, Option[Segment[O, Unit]]]).flatMap { outQ =>
-          Stream.eval(async.unboundedQueue[F, Option[Segment[O, Unit]]]).flatMap { sinkQ =>
-            val inputStream =
-              self.segments.noneTerminate.evalMap {
-                case Some(segment) =>
-                  guard.decrement >>
-                    sinkQ.enqueue1(Some(segment))
-
-                case None =>
-                  sinkQ.enqueue1(None)
+      // Subtracted one from the max queued, as the first segment is guaranteed to be passed in.
+      Stream.eval(async.semaphore[F](maxQueued - 1)).flatMap { guard =>
+        Stream.eval(async.unboundedQueue[F, Option[Segment[O, Unit]]]).flatMap { sinkQ =>
+          val runner =
+            sinkQ.dequeue.unNoneTerminate
+              .flatMap { segment =>
+                Stream.segment(segment) ++
+                  Stream.eval_(guard.increment)
               }
+              .to(sink)
 
-            val sinkStream =
-              sinkQ.dequeue.unNoneTerminate
-                .flatMap { segment =>
-                  Stream.segment(segment) ++
-                    Stream.eval_(outQ.enqueue1(Some(segment)))
-                }
-                .to(sink) ++
-                Stream.eval_(outQ.enqueue1(None))
+          self.segments.noneTerminate
+            .flatMap {
+              case Some(segment) =>
+                Stream.eval_(sinkQ.enqueue1(Some(segment))) ++
+                  Stream.eval_(guard.decrement) ++
+                  Stream.segment(segment)
 
-            val runner =
-              sinkStream.concurrently(inputStream) ++
-                Stream.eval_(outQ.enqueue1(None))
-
-            val outputStream =
-              outQ.dequeue.unNoneTerminate
-                .flatMap { segment =>
-                  Stream.eval(guard.increment) >>
-                    Stream.segment(segment)
-                }
-
-            outputStream.concurrently(runner)
-
-          }
+              case None =>
+                Stream.eval_(sinkQ.enqueue1(None))
+            }
+            .concurrently(runner)
         }
       }
 

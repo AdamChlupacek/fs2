@@ -493,7 +493,7 @@ class PipeSpec extends Fs2Spec {
     }
 
     "observe/observeAsync" - {
-      "basic functionality" in {
+      "observe basic functionality" in {
         forAll { (s: PureStream[Int]) =>
           val sum = new AtomicLong(0)
           val out = runLog {
@@ -502,16 +502,41 @@ class PipeSpec extends Fs2Spec {
             }
           }
           out.map(_.toLong).sum shouldBe sum.get
-          sum.set(0)
-          val out2 = runLog {
-            s.get.covary[IO].observeAsync(maxQueued = 10) {
-              _.evalMap(i => IO { sum.addAndGet(i.toLong); () })
-            }
-          }
-          out2.map(_.toLong).sum shouldBe sum.get
         }
       }
+
+      "observeAsync terminate on downstream" in {
+        Stream(1, 2, 3, 4, 5)
+          .covary[IO]
+          .observeAsync(100)(_.evalMap(_ => IO.async[Unit](_ => ())))
+          .take(5)
+          .compile
+          .toVector
+          .unsafeRunTimed(1.second) shouldBe Some(Vector(1, 2, 3, 4, 5))
+      }
+
+      "observe is not eager (1)" in {
+        //Do not pull another element before we emit the currently processed one
+        (Stream.eval(IO(1)) ++ Stream.eval(IO.raiseError(new Throwable("Boom"))))
+          .observe(_.evalMap(_ => IO(Thread.sleep(100)))) //Have to do some work here, so that we give time for the underlying stream to try pull more
+          .take(1)
+          .compile
+          .toVector
+          .unsafeRunSync shouldBe Vector(1)
+      }
+
+      "observe is not eager (2)" in {
+        //Do not pull another element before the downstream asks for another
+        (Stream.eval(IO(1)) ++ Stream.eval(IO.raiseError(new Throwable("Boom"))))
+          .observe(_.drain)
+          .flatMap(_ => Stream.eval(IO(Thread.sleep(100))) >> Stream(1, 2)) //Have to do some work here, so that we give time for the underlying stream to try pull more
+          .take(2)
+          .compile
+          .toVector
+          .unsafeRunSync shouldBe Vector(1, 2)
+      }
     }
+
     "handle errors from observing sink" in {
       forAll { (s: PureStream[Int]) =>
         runLog {
