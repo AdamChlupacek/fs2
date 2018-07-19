@@ -1,6 +1,7 @@
 package fs2
 
-import fs2.internal.FreeC
+import fs2.internal.{Either3, FreeC}
+
 import scala.util.control.NonFatal
 
 object Pipe2 {
@@ -43,13 +44,13 @@ object Pipe2 {
             case Left(recv) =>
               Stepper.AwaitL(
                 segment =>
-                  try go(f(Right(recv(segment))))
-                  catch { case NonFatal(t) => go(f(Left(t))) })
+                  try go(f(Either3.Right(recv(segment))))
+                  catch { case NonFatal(t) => go(f(Either3.Left(t))) })
             case Right(recv) =>
               Stepper.AwaitR(
                 segment =>
-                  try go(f(Right(recv(segment))))
-                  catch { case NonFatal(t) => go(f(Left(t))) })
+                  try go(f(Either3.Right(recv(segment))))
+                  catch { case NonFatal(t) => go(f(Either3.Left(t))) })
           }
         case e =>
           sys.error(

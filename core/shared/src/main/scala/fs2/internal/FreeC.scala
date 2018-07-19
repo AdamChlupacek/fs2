@@ -12,46 +12,73 @@ import scala.util.control.NonFatal
 private[fs2] sealed abstract class FreeC[F[_], +R] {
 
   def flatMap[R2](f: R => FreeC[F, R2]): FreeC[F, R2] =
-    Bind[F, R, R2](this,
-                   e =>
-                     e match {
-                       case Right(r) =>
-                         try f(r)
-                         catch { case NonFatal(e) => FreeC.Fail(e) }
-                       case Left(e) => FreeC.Fail(e)
-                   })
+    Bind[F, R, R2](
+      this,
+      e =>
+        e match {
+          case Either3.Right(r) =>
+            try f(r)
+            catch { case NonFatal(e) => FreeC.Fail(e) }
+          case Either3.Left(e)   => FreeC.Fail(e)
+          case Either3.Middle(i) => FreeC.Interrupted(i)
+      }
+    )
 
   def transformWith[R2](f: Either[Throwable, R] => FreeC[F, R2]): FreeC[F, R2] =
-    Bind[F, R, R2](this,
-                   r =>
-                     try f(r)
-                     catch { case NonFatal(e) => FreeC.Fail(e) })
+    Bind[F, R, R2](
+      this,
+      r =>
+        r match {
+          case Either3.Right(r) =>
+            try f(Right(r))
+            catch { case NonFatal(e) => FreeC.Fail(e) }
+          case Either3.Left(e) =>
+            try f(Left(e))
+            catch { case NonFatal(e) => FreeC.Fail(e) }
+          case Either3.Middle(i) => FreeC.Interrupted(i)
+      }
+    )
+
+  def transformWith3[R2](f: Either3[Throwable, Interrupt, R] => FreeC[F, R2]): FreeC[F, R2] =
+    Bind[F, R, R2](
+      this,
+      r =>
+        try f(r)
+        catch { case NonFatal(e) => FreeC.Fail(e) }
+    )
 
   def map[R2](f: R => R2): FreeC[F, R2] =
-    Bind(this,
-         (r: Either[Throwable, R]) =>
-           r match {
-             case Right(r) =>
-               try FreeC.Pure(f(r))
-               catch { case NonFatal(e) => FreeC.Fail(e) }
-             case Left(e) => FreeC.Fail(e)
-         })
+    Bind(
+      this,
+      (r: Either3[Throwable, Interrupt, R]) =>
+        r match {
+          case Either3.Right(r) =>
+            try FreeC.Pure(f(r))
+            catch { case NonFatal(e) => FreeC.Fail(e) }
+          case Either3.Left(e)   => FreeC.Fail(e)
+          case Either3.Middle(i) => FreeC.Interrupted(i)
+      }
+    )
 
   def handleErrorWith[R2 >: R](h: Throwable => FreeC[F, R2]): FreeC[F, R2] =
-    Bind[F, R2, R2](this,
-                    e =>
-                      e match {
-                        case Right(a) => FreeC.Pure(a)
-                        case Left(e) =>
-                          try h(e)
-                          catch { case NonFatal(e) => FreeC.Fail(e) }
-                    })
+    Bind[F, R2, R2](
+      this,
+      e =>
+        e match {
+          case Either3.Right(a) => FreeC.Pure(a)
+          case Either3.Left(e) =>
+            try h(e)
+            catch { case NonFatal(e) => FreeC.Fail(e) }
+          case Either3.Middle(i) => FreeC.Interrupted(i)
+      }
+    )
 
   def asHandler(e: Throwable): FreeC[F, R] = viewL.get match {
-    case Pure(_)    => Fail(e)
-    case Fail(e2)   => Fail(e)
-    case Bind(_, k) => k(Left(e))
-    case Eval(_)    => sys.error("impossible")
+    case Pure(_)        => Fail(e)
+    case Fail(e2)       => Fail(e)
+    case Bind(_, k)     => k(Either3.Left(e))
+    case Eval(_)        => sys.error("impossible")
+    case Interrupted(_) => Fail(e)
   }
 
   def viewL: ViewL[F, R] = mkViewL(this)
@@ -60,9 +87,10 @@ private[fs2] sealed abstract class FreeC[F[_], +R] {
     viewL.get match {
       case Pure(r) => Pure(r)
       case Bind(fx, k) =>
-        Bind(fx.translate(f), (e: Either[Throwable, Any]) => k(e).translate(f))
-      case Fail(e)  => Fail(e)
-      case Eval(fx) => sys.error("impossible")
+        Bind(fx.translate(f), (e: Either3[Throwable, Interrupt, Any]) => k(e).translate(f))
+      case Fail(e)        => Fail(e)
+      case Interrupted(i) => Interrupted(i)
+      case Eval(fx)       => sys.error("impossible")
     }
   }
 }
@@ -79,7 +107,8 @@ private[fs2] object FreeC {
       catch { case NonFatal(t) => Fail[G, R](t) }
     override def toString: String = s"FreeC.Eval($fr)"
   }
-  final case class Bind[F[_], X, R](fx: FreeC[F, X], f: Either[Throwable, X] => FreeC[F, R])
+  final case class Bind[F[_], X, R](fx: FreeC[F, X],
+                                    f: Either3[Throwable, Interrupt, X] => FreeC[F, R])
       extends FreeC[F, R] {
     override def toString: String = s"FreeC.Bind($fx, $f)"
   }
@@ -89,14 +118,21 @@ private[fs2] object FreeC {
     override def toString: String = s"FreeC.Fail($error)"
   }
 
-  private val pureContinuation_ = (e: Either[Throwable, Any]) =>
-    e match {
-      case Right(r) => Pure[Any, Any](r)
-      case Left(e)  => Fail[Any, Any](e)
+  final case class Interrupted[F[_], R](interrupt: Interrupt) extends FreeC[F, R] {
+    override def translate[G[_]](f: F ~> G): FreeC[G, R] =
+      this.asInstanceOf[FreeC[G, R]]
+    override def toString: String = s"FreeC.Interrupted($interrupt)"
   }
 
-  def pureContinuation[F[_], R]: Either[Throwable, R] => FreeC[F, R] =
-    pureContinuation_.asInstanceOf[Either[Throwable, R] => FreeC[F, R]]
+  private val pureContinuation_ = (e: Either3[Throwable, Interrupt, Any]) =>
+    e match {
+      case Either3.Right(r)  => Pure[Any, Any](r)
+      case Either3.Left(e)   => Fail[Any, Any](e)
+      case Either3.Middle(i) => Interrupted[Any, Any](i)
+  }
+
+  def pureContinuation[F[_], R]: Either3[Throwable, Interrupt, R] => FreeC[F, R] =
+    pureContinuation_.asInstanceOf[Either3[Throwable, Interrupt, R] => FreeC[F, R]]
 
   def suspend[F[_], R](fr: => FreeC[F, R]): FreeC[F, R] =
     Pure[F, Unit](()).flatMap(_ => fr)
@@ -110,17 +146,19 @@ private[fs2] object FreeC {
   private def mkViewL[F[_], R](free: FreeC[F, R]): ViewL[F, R] = {
     @annotation.tailrec
     def go[X](free: FreeC[F, X]): ViewL[F, R] = free match {
-      case Pure(x) => new ViewL(free.asInstanceOf[FreeC[F, R]])
+      case Pure(x)        => new ViewL(free.asInstanceOf[FreeC[F, R]])
+      case Interrupted(i) => new ViewL(free.asInstanceOf[FreeC[F, R]])
       case Eval(fx) =>
         new ViewL(Bind(free.asInstanceOf[FreeC[F, R]], pureContinuation[F, R]))
       case Fail(err) => new ViewL(free.asInstanceOf[FreeC[F, R]])
       case b: FreeC.Bind[F, y, X] =>
         b.fx match {
-          case Pure(x) => go(b.f(Right(x)))
-          case Fail(e) => go(b.f(Left(e)))
-          case Eval(_) => new ViewL(b.asInstanceOf[FreeC[F, R]])
+          case Pure(x)        => go(b.f(Either3.Right(x)))
+          case Fail(e)        => go(b.f(Either3.Left(e)))
+          case Interrupted(i) => go(b.f(Either3.Middle(i)))
+          case Eval(_)        => new ViewL(b.asInstanceOf[FreeC[F, R]])
           case Bind(w, g) =>
-            go(Bind(w, (e: Either[Throwable, Any]) => Bind(g(e), b.f)))
+            go(Bind(w, (e: Either3[Throwable, Interrupt, Any]) => Bind(g(e), b.f)))
         }
     }
     go(free)
@@ -133,9 +171,10 @@ private[fs2] object FreeC {
         case Fail(e) => F.raiseError(e)
         case Bind(fr, k) =>
           F.flatMap(F.attempt(fr.asInstanceOf[Eval[F, Any]].fr)) { e =>
-            k(e).run
+            k(Either3.fromEither(e)).run
           }
-        case Eval(_) => sys.error("impossible")
+        case Eval(_)        => sys.error("impossible")
+        case Interrupted(i) => F.raiseError(i)
       }
   }
 

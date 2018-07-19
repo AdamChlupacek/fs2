@@ -2,7 +2,8 @@ package fs2
 
 import cats.effect.Concurrent
 import fs2.async.mutable.Queue
-import fs2.internal.FreeC
+import fs2.internal.{Either3, FreeC}
+
 import scala.util.control.NonFatal
 
 object Pipe {
@@ -41,8 +42,8 @@ object Pipe {
           val fx = bound.fx.asInstanceOf[FreeC.Eval[ReadSegment, x]].fr
           Stepper.Await(
             segment =>
-              try go(bound.f(Right(fx(segment))))
-              catch { case NonFatal(t) => go(bound.f(Left(t))) })
+              try go(bound.f(Either3.Right(fx(segment))))
+              catch { case NonFatal(t) => go(bound.f(Either3.Left(t))) })
         case e =>
           sys.error(
             "FreeC.ViewL structure must be Pure(a), Fail(e), or Bind(Eval(fx),k), was: " + e)

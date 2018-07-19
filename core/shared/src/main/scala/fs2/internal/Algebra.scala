@@ -220,6 +220,9 @@ private[fs2] object Algebra {
         case failed: FreeC.Fail[Algebra[F, X, ?], Unit] =>
           F.raiseError(failed.error)
 
+        case i: FreeC.Interrupted[Algebra[F, X, ?], Unit] =>
+          F.raiseError(i.interrupt) // TODO
+
         case e: FreeC.Eval[Algebra[F, X, ?], Unit] =>
           F.raiseError(
             new Throwable(
@@ -227,14 +230,14 @@ private[fs2] object Algebra {
 
         case bound: FreeC.Bind[Algebra[F, X, ?], y, Unit] =>
           val f = bound.f
-            .asInstanceOf[Either[Throwable, Any] => FreeC[Algebra[F, X, ?], Unit]]
+            .asInstanceOf[Either3[Throwable, Interrupt, Any] => FreeC[Algebra[F, X, ?], Unit]]
           val fx = bound.fx.asInstanceOf[FreeC.Eval[Algebra[F, X, ?], y]].fr
 
           def interruptGuard(next: => F[R[X]]): F[R[X]] =
             F.flatMap(scope.isInterrupted) {
               case None => next
               case Some(Left(err)) =>
-                go(scope, f(Left(err)))
+                go(scope, f(Either3.Left(err)))
               case Some(Right(scopeId)) =>
                 scope.whenInterrupted(scopeId).map {
                   case (scope0, next) => Interrupted[X](scope0, next)
@@ -245,7 +248,7 @@ private[fs2] object Algebra {
           fx match {
             case output: Algebra.Output[F, X] =>
               interruptGuard(
-                F.pure(Out(output.values, scope, FreeC.Pure(()).transformWith(f)))
+                F.pure(Out(output.values, scope, FreeC.Pure(()).transformWith3(f)))
               )
 
             case run: Algebra.Run[F, X, r] =>
@@ -253,9 +256,9 @@ private[fs2] object Algebra {
                 val (h, t) =
                   // Values hardcoded here until we figure out how to properly expose them
                   run.values.force.splitAt(1024, Some(10000)) match {
-                    case Left((r, chunks, _)) => (chunks, FreeC.Pure(r).transformWith(f))
+                    case Left((r, chunks, _)) => (chunks, FreeC.Pure(r).transformWith3(f))
                     case Right((chunks, tail)) =>
-                      (chunks, segment(tail).transformWith(f))
+                      (chunks, segment(tail).transformWith3(f))
                   }
 
                 F.pure(Out(Segment.catenatedChunks(h), scope, t))
@@ -271,26 +274,26 @@ private[fs2] object Algebra {
                   F.flatMap(F.attempt(go[y](stepScope, u.stream))) {
                     case Right(Done(scope)) =>
                       interruptGuard(
-                        go(scope, f(Right(None)))
+                        go(scope, f(Either3.Right(None)))
                       )
                     case Right(Out(head, outScope, tail)) =>
                       // if we originally swapped scopes we want to return the original
                       // scope back to the go as that is the scope that is expected to be here.
                       val nextScope = u.scope.fold(outScope)(_ => scope)
                       interruptGuard(
-                        go(nextScope, f(Right(Some((head, outScope.id, tail)))))
+                        go(nextScope, f(Either3.Right(Some((head, outScope.id, tail)))))
                       )
                     case Right(Interrupted(scope, next)) => F.pure(Interrupted(scope, next))
                     case Right(OpenInterruptibly(scope, concurrent, onInterrupt, next)) =>
                       def transform(s: FreeC[Algebra[F, y, ?], Unit]) =
-                        step(s, None).transformWith(f)
+                        step(s, None).transformWith3(f)
                       F.pure(
                         OpenInterruptibly(scope, concurrent, transform(onInterrupt), next.andThen {
                           s =>
                             transform(s)
                         }))
                     case Left(err) =>
-                      go(scope, f(Left(err)))
+                      go(scope, f(Either3.Left(err)))
                   }
                 case None =>
                   F.raiseError(
@@ -300,8 +303,8 @@ private[fs2] object Algebra {
 
             case eval: Algebra.Eval[F, X, r] =>
               F.flatMap(scope.interruptibleEval(eval.value)) {
-                case Right(r)        => go[X](scope, f(Right(r)))
-                case Left(Left(err)) => go[X](scope, f(Left(err)))
+                case Right(r)        => go[X](scope, f(Either3.Right(r)))
+                case Left(Left(err)) => go[X](scope, f(Either3.Left(err)))
                 case Left(Right(token)) =>
                   scope.whenInterrupted(token).map {
                     case (scope0, next) => Interrupted[X](scope0, next)
@@ -311,32 +314,33 @@ private[fs2] object Algebra {
             case acquire: Algebra.Acquire[F, X, r] =>
               interruptGuard {
                 F.flatMap(scope.acquireResource(acquire.resource, acquire.release)) { r =>
-                  go[X](scope, f(r))
+                  go[X](scope, f(Either3.fromEither(r)))
                 }
               }
 
             case release: Algebra.Release[F, X] =>
               F.flatMap(scope.releaseResource(release.token)) { r =>
-                go[X](scope, f(r))
+                go[X](scope, f(Either3.fromEither(r)))
               }
 
             case _: Algebra.GetScope[F, X, y] =>
-              go(scope, f(Right(scope)))
+              go(scope, f(Either3.Right(scope)))
 
             case open: Algebra.OpenScope[F, X] =>
               interruptGuard {
                 open.interruptible match {
                   case None =>
                     F.flatMap(scope.open(None)) { childScope =>
-                      go(childScope, f(Right(Some(childScope.id))))
+                      go(childScope, f(Either3.Right(Some(childScope.id))))
                     }
 
                   case Some(concurrent) =>
                     F.pure(
-                      OpenInterruptibly(scope,
-                                        concurrent,
-                                        FreeC.suspend(f(Right(None))),
-                                        r => f(r.right.map(scope => Some(scope.id)))))
+                      OpenInterruptibly(
+                        scope,
+                        concurrent,
+                        FreeC.suspend(f(Either3.Right(None))),
+                        r => f(Either3.fromEither(r.right.map(scope => Some(scope.id))))))
                 }
               }
 
@@ -349,7 +353,7 @@ private[fs2] object Algebra {
                 def closeAndGo(toClose: CompileScope[F, O]) =
                   F.flatMap(toClose.close) { r =>
                     F.flatMap(toClose.openAncestor) { ancestor =>
-                      go(ancestor, f(r))
+                      go(ancestor, f(Either3.fromEither(r)))
                     }
                   }
 
@@ -361,7 +365,7 @@ private[fs2] object Algebra {
                         closeAndGo(toClose)
                       case None =>
                         // scope already closed, continue with current scope
-                        go(scope, f(Right(())))
+                        go(scope, f(Either3.Right(())))
                     }
                 }
               }
@@ -382,120 +386,120 @@ private[fs2] object Algebra {
     }
   }
 
-  private def translateStep[F[_], G[_], X](
-      fK: F ~> G,
-      next: FreeC[Algebra[F, X, ?], Unit],
-      concurrent: Option[Concurrent[G]]
-  ): FreeC[Algebra[G, X, ?], Unit] =
-    next.viewL.get match {
-      case _: FreeC.Pure[Algebra[F, X, ?], Unit] =>
-        FreeC.Pure[Algebra[G, X, ?], Unit](())
-
-      case failed: FreeC.Fail[Algebra[F, X, ?], Unit] =>
-        Algebra.raiseError(failed.error)
-
-      case bound: FreeC.Bind[Algebra[F, X, ?], _, Unit] =>
-        val f = bound.f
-          .asInstanceOf[Either[Throwable, Any] => FreeC[Algebra[F, X, ?], Unit]]
-        val fx = bound.fx.asInstanceOf[FreeC.Eval[Algebra[F, X, ?], _]].fr
-
-        fx match {
-          case output: Algebra.Output[F, X] =>
-            Algebra.output[G, X](output.values).transformWith {
-              case Right(v) =>
-                // Cast is safe here, as at this point the evaluation of this Step will end
-                // and the remainder of the free will be passed as a result in Bind. As such
-                // next Step will have this to evaluate, and will try to translate again.
-                f(Right(v))
-                  .asInstanceOf[FreeC[Algebra[G, X, ?], Unit]]
-              case Left(err) => translateStep(fK, f(Left(err)), concurrent)
-            }
-
-          case run: Algebra.Run[F, X, r] =>
-            Algebra.segment[G, X, r](run.values).transformWith {
-              case Right(v) =>
-                // Cast is safe here, as at this point the evaluation of this Step will end
-                // and the remainder of the free will be passed as a result in Bind. As such
-                // next Step will have this to evaluate, and will try to translate again.
-                f(Right(v))
-                  .asInstanceOf[FreeC[Algebra[G, X, ?], Unit]]
-              case Left(err) => translateStep(fK, f(Left(err)), concurrent)
-            }
-
-          case step: Algebra.Step[F, x, X] =>
-            FreeC
-              .Eval[Algebra[G, X, ?],
-                    Option[(Segment[x, Unit], Token, FreeC[Algebra[G, x, ?], Unit])]](
-                Algebra.Step[G, x, X](
-                  stream = translateStep[F, G, x](fK, step.stream, concurrent),
-                  scope = step.scope
-                ))
-              .transformWith { r =>
-                translateStep[F, G, X](fK, f(r), concurrent)
-              }
-
-          case alg: Algebra.AlgEffect[F, X, r] =>
-            FreeC.Eval[Algebra[G, X, ?], r](alg.translate[G](concurrent, fK)).transformWith { r =>
-              translateStep(fK, f(r), concurrent)
-            }
-
-        }
-
-      case e =>
-        sys.error(
-          "FreeC.ViewL structure must be Pure(a), Fail(e), or Bind(Eval(fx),k), (translateLeg) was: " + e)
-    }
+//  private def translateStep[F[_], G[_], X](
+//      fK: F ~> G,
+//      next: FreeC[Algebra[F, X, ?], Unit],
+//      concurrent: Option[Concurrent[G]]
+//  ): FreeC[Algebra[G, X, ?], Unit] =
+//    next.viewL.get match {
+//      case _: FreeC.Pure[Algebra[F, X, ?], Unit] =>
+//        FreeC.Pure[Algebra[G, X, ?], Unit](())
+//
+//      case failed: FreeC.Fail[Algebra[F, X, ?], Unit] =>
+//        Algebra.raiseError(failed.error)
+//
+//      case bound: FreeC.Bind[Algebra[F, X, ?], _, Unit] =>
+//        val f = bound.f
+//          .asInstanceOf[Either[Throwable, Any] => FreeC[Algebra[F, X, ?], Unit]]
+//        val fx = bound.fx.asInstanceOf[FreeC.Eval[Algebra[F, X, ?], _]].fr
+//
+//        fx match {
+//          case output: Algebra.Output[F, X] =>
+//            Algebra.output[G, X](output.values).transformWith {
+//              case Right(v) =>
+//                // Cast is safe here, as at this point the evaluation of this Step will end
+//                // and the remainder of the free will be passed as a result in Bind. As such
+//                // next Step will have this to evaluate, and will try to translate again.
+//                f(Either3.Right(v))
+//                  .asInstanceOf[FreeC[Algebra[G, X, ?], Unit]]
+//              case Left(err) => translateStep(fK, f(Either3.Left(err)), concurrent)
+//            }
+//
+//          case run: Algebra.Run[F, X, r] =>
+//            Algebra.segment[G, X, r](run.values).transformWith {
+//              case Right(v) =>
+//                // Cast is safe here, as at this point the evaluation of this Step will end
+//                // and the remainder of the free will be passed as a result in Bind. As such
+//                // next Step will have this to evaluate, and will try to translate again.
+//                f(Right(v))
+//                  .asInstanceOf[FreeC[Algebra[G, X, ?], Unit]]
+//              case Left(err) => translateStep(fK, f(Left(err)), concurrent)
+//            }
+//
+//          case step: Algebra.Step[F, x, X] =>
+//            FreeC
+//              .Eval[Algebra[G, X, ?],
+//                    Option[(Segment[x, Unit], Token, FreeC[Algebra[G, x, ?], Unit])]](
+//                Algebra.Step[G, x, X](
+//                  stream = translateStep[F, G, x](fK, step.stream, concurrent),
+//                  scope = step.scope
+//                ))
+//              .transformWith { r =>
+//                translateStep[F, G, X](fK, f(r), concurrent)
+//              }
+//
+//          case alg: Algebra.AlgEffect[F, X, r] =>
+//            FreeC.Eval[Algebra[G, X, ?], r](alg.translate[G](concurrent, fK)).transformWith { r =>
+//              translateStep(fK, f(r), concurrent)
+//            }
+//
+//        }
+//
+//      case e =>
+//        sys.error(
+//          "FreeC.ViewL structure must be Pure(a), Fail(e), or Bind(Eval(fx),k), (translateLeg) was: " + e)
+//    }
 
   private def translate0[F[_], G[_], O](
       fK: F ~> G,
       s: FreeC[Algebra[F, O, ?], Unit],
       concurrent: Option[Concurrent[G]]
-  ): FreeC[Algebra[G, O, ?], Unit] =
-    s.viewL.get match {
-      case _: FreeC.Pure[Algebra[F, O, ?], Unit] =>
-        FreeC.Pure[Algebra[G, O, ?], Unit](())
-
-      case failed: FreeC.Fail[Algebra[F, O, ?], Unit] =>
-        Algebra.raiseError(failed.error)
-
-      case bound: FreeC.Bind[Algebra[F, O, ?], _, Unit] =>
-        val f = bound.f
-          .asInstanceOf[Either[Throwable, Any] => FreeC[Algebra[F, O, ?], Unit]]
-        val fx = bound.fx.asInstanceOf[FreeC.Eval[Algebra[F, O, ?], _]].fr
-
-        fx match {
-          case output: Algebra.Output[F, O] =>
-            Algebra.output[G, O](output.values).transformWith { r =>
-              translate0(fK, f(r), concurrent)
-            }
-
-          case run: Algebra.Run[F, O, r] =>
-            Algebra.segment[G, O, r](run.values).transformWith { r =>
-              translate0(fK, f(r), concurrent)
-            }
-
-          case step: Algebra.Step[F, x, O] =>
-            FreeC
-              .Eval[Algebra[G, O, ?],
-                    Option[(Segment[x, Unit], Token, FreeC[Algebra[G, x, ?], Unit])]](
-                Algebra.Step[G, x, O](
-                  stream = translateStep[F, G, x](fK, step.stream, concurrent),
-                  scope = step.scope
-                ))
-              .transformWith { r =>
-                translate0(fK, f(r), concurrent)
-              }
-
-          case alg: Algebra.AlgEffect[F, O, r] =>
-            FreeC.Eval[Algebra[G, O, ?], r](alg.translate[G](concurrent, fK)).transformWith { r =>
-              translate0(fK, f(r), concurrent)
-            }
-
-        }
-
-      case e =>
-        sys.error(
-          "FreeC.ViewL structure must be Pure(a), Fail(e), or Bind(Eval(fx),k), (translateLeg) was: " + e)
-    }
+  ): FreeC[Algebra[G, O, ?], Unit] = ???
+//    s.viewL.get match {
+//      case _: FreeC.Pure[Algebra[F, O, ?], Unit] =>
+//        FreeC.Pure[Algebra[G, O, ?], Unit](())
+//
+//      case failed: FreeC.Fail[Algebra[F, O, ?], Unit] =>
+//        Algebra.raiseError(failed.error)
+//
+//      case bound: FreeC.Bind[Algebra[F, O, ?], _, Unit] =>
+//        val f = bound.f
+//          .asInstanceOf[Either[Throwable, Any] => FreeC[Algebra[F, O, ?], Unit]]
+//        val fx = bound.fx.asInstanceOf[FreeC.Eval[Algebra[F, O, ?], _]].fr
+//
+//        fx match {
+//          case output: Algebra.Output[F, O] =>
+//            Algebra.output[G, O](output.values).transformWith { r =>
+//              translate0(fK, f(r), concurrent)
+//            }
+//
+//          case run: Algebra.Run[F, O, r] =>
+//            Algebra.segment[G, O, r](run.values).transformWith { r =>
+//              translate0(fK, f(r), concurrent)
+//            }
+//
+//          case step: Algebra.Step[F, x, O] =>
+//            FreeC
+//              .Eval[Algebra[G, O, ?],
+//                    Option[(Segment[x, Unit], Token, FreeC[Algebra[G, x, ?], Unit])]](
+//                Algebra.Step[G, x, O](
+//                  stream = translateStep[F, G, x](fK, step.stream, concurrent),
+//                  scope = step.scope
+//                ))
+//              .transformWith { r =>
+//                translate0(fK, f(r), concurrent)
+//              }
+//
+//          case alg: Algebra.AlgEffect[F, O, r] =>
+//            FreeC.Eval[Algebra[G, O, ?], r](alg.translate[G](concurrent, fK)).transformWith { r =>
+//              translate0(fK, f(r), concurrent)
+//            }
+//
+//        }
+//
+//      case e =>
+//        sys.error(
+//          "FreeC.ViewL structure must be Pure(a), Fail(e), or Bind(Eval(fx),k), (translateLeg) was: " + e)
+//    }
 
 }
