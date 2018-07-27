@@ -5,7 +5,8 @@ import cats.data.NonEmptyList
 import cats.effect._
 import cats.effect.concurrent.{Deferred, Ref, Semaphore}
 import cats.implicits.{catsSyntaxEither => _, _}
-import fs2.internal.{Algebra, Canceled, FreeC, Token}
+import fs2.internal.{Resource => _, _}
+
 import scala.collection.generic.CanBuildFrom
 import scala.concurrent.duration._
 
@@ -74,7 +75,26 @@ final class Stream[+F[_], +O] private (private val free: FreeC[Algebra[Nothing, 
 
   /** Appends `s2` to the end of this stream. Alias for `s1 ++ s2`. */
   def append[F2[x] >: F[x], O2 >: O](s2: => Stream[F2, O2]): Stream[F2, O2] =
-    Stream.fromFreeC(get[F2, O2].flatMap(_ => s2.get))
+    Stream.fromFreeC(
+      get[F2, O2].transformWith3 {
+        case Either3.Right(_)  => s2.get[F2, O2]
+        case Either3.Left(err) => FreeC.Fail(err)
+        case Either3.Middle(i) =>
+          Algebra.getScope[F2, O2, Scope[F]].flatMap {
+            scope =>
+//            println("XXXX with scope id: " + i.recoverAtScope + " comparing to: " + scope.id)
+              if (i.recoverAtScope == scope.id) {
+                println(
+                  "XXXX GOOD with scope id: " + i.recoverAtScope + " comparing to: " + scope.id)
+                s2.get[F2, O2]
+              } else {
+                println(
+                  "XXXX BAD with scope id: " + i.recoverAtScope + " comparing to: " + scope.id)
+                FreeC.Interrupted(i)
+              }
+          }
+      }
+    )
 
   /**
     * Alias for `_.map(_ => o2)`.
@@ -800,7 +820,14 @@ final class Stream[+F[_], +O] private (private val free: FreeC[Algebra[Nothing, 
         }
         only match {
           case None =>
-            hd.map(f)
+            hd.map(a =>
+                Stream.fromFreeC(f(a).get[F2, O2].transformWith3 {
+                  case Either3.Right(right) => Algebra.pure(right)
+                  case Either3.Left(left)   => Algebra.raiseError(left)
+                  case Either3.Middle(i) =>
+                    println("XXB" + tl.asInterruptHandler(i).viewL.get)
+                    FreeC.Interrupted(i)
+                }))
               .foldRightLazy(Stream.fromFreeC(tl).flatMap(f))(_ ++ _)
               .get
 

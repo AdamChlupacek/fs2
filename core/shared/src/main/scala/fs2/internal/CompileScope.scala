@@ -412,12 +412,8 @@ private[fs2] final class CompileScope[F[_], O] private (
           case None =>
             F.raiseError(new IllegalStateException("Non-interruptible scope was interrupted"))
           case Some(iCtx) =>
-            F.flatMap(scope.close) { r =>
-              F.map(scope.openAncestor) { scope =>
-                (scope, r.left.toOption.fold(iCtx.whenInterrupted) { err =>
-                  Algebra.raiseError(err)
-                })
-              }
+            F.map(scope.openAncestor) { scope =>
+              (scope, iCtx.whenInterrupted)
             }
         }
     }

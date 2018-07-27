@@ -81,6 +81,14 @@ private[fs2] sealed abstract class FreeC[F[_], +R] {
     case Interrupted(_) => Fail(e)
   }
 
+  def asInterruptHandler(i: Interrupt): FreeC[F, R] = viewL.get match {
+    case Pure(_)        => Interrupted(i)
+    case Fail(e)        => Fail(e)
+    case Bind(_, k)     => k(Either3.Middle(i))
+    case Eval(_)        => sys.error("impossible")
+    case Interrupted(_) => sys.error("impossible")
+  }
+
   def viewL: ViewL[F, R] = mkViewL(this)
 
   def translate[G[_]](f: F ~> G): FreeC[G, R] = FreeC.suspend {
@@ -145,22 +153,23 @@ private[fs2] object FreeC {
 
   private def mkViewL[F[_], R](free: FreeC[F, R]): ViewL[F, R] = {
     @annotation.tailrec
-    def go[X](free: FreeC[F, X]): ViewL[F, R] = free match {
-      case Pure(x)        => new ViewL(free.asInstanceOf[FreeC[F, R]])
-      case Interrupted(i) => new ViewL(free.asInstanceOf[FreeC[F, R]])
-      case Eval(fx) =>
-        new ViewL(Bind(free.asInstanceOf[FreeC[F, R]], pureContinuation[F, R]))
-      case Fail(err) => new ViewL(free.asInstanceOf[FreeC[F, R]])
-      case b: FreeC.Bind[F, y, X] =>
-        b.fx match {
-          case Pure(x)        => go(b.f(Either3.Right(x)))
-          case Fail(e)        => go(b.f(Either3.Left(e)))
-          case Interrupted(i) => go(b.f(Either3.Middle(i)))
-          case Eval(_)        => new ViewL(b.asInstanceOf[FreeC[F, R]])
-          case Bind(w, g) =>
-            go(Bind(w, (e: Either3[Throwable, Interrupt, Any]) => Bind(g(e), b.f)))
-        }
-    }
+    def go[X](free: FreeC[F, X]): ViewL[F, R] =
+//      println("XIOIO free now" + free)
+      free match {
+        case Pure(x)        => new ViewL(free.asInstanceOf[FreeC[F, R]])
+        case Interrupted(i) => new ViewL(free.asInstanceOf[FreeC[F, R]])
+        case Eval(fx)       => new ViewL(Bind(free.asInstanceOf[FreeC[F, R]], pureContinuation[F, R]))
+        case Fail(err)      => new ViewL(free.asInstanceOf[FreeC[F, R]])
+        case b: FreeC.Bind[F, y, X] =>
+          b.fx match {
+            case Pure(x)        => go(b.f(Either3.Right(x)))
+            case Fail(e)        => go(b.f(Either3.Left(e)))
+            case Interrupted(i) => go(b.f(Either3.Middle(i)))
+            case Eval(_)        => new ViewL(b.asInstanceOf[FreeC[F, R]])
+            case Bind(w, g) =>
+              go(Bind(w, (e: Either3[Throwable, Interrupt, Any]) => Bind(g(e), b.f)))
+          }
+      }
     go(free)
   }
 
