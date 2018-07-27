@@ -58,6 +58,14 @@ final class Pull[+F[_], +O, +R] private (private val free: FreeC[Algebra[Nothing
   /** Applies the resource of this pull to `f` and returns the result. */
   def flatMap[F2[x] >: F[x], O2 >: O, R2](f: R => Pull[F2, O2, R2]): Pull[F2, O2, R2] =
     Pull.fromFreeC(get[F2, O2, R].flatMap(r => f(r).get))
+//      .transformWith3 {
+//      case Either3.Right(right) => Algebra.pure(right)
+//      case Either3.Left(left)   => Algebra.raiseError(left)
+//      case Either3.Middle(i)    =>
+//        //        println("XXB" + Algebra.goThrough[F2, O2, O](i, get[F2,O]).viewL.get)
+//        Algebra.goThrough[F2, O2, O2](i, get[F2, O2]).asInstanceOf[FreeC[Algebra[F, O2, ?], R]]
+//      //                    FreeC.Interrupted(i)
+//    })
 
   /** Alias for `flatMap(_ => p2)`. */
   def >>[F2[x] >: F[x], O2 >: O, R2](p2: => Pull[F2, O2, R2]): Pull[F2, O2, R2] =

@@ -84,12 +84,12 @@ final class Stream[+F[_], +O] private (private val free: FreeC[Algebra[Nothing, 
             scope =>
 //            println("XXXX with scope id: " + i.recoverAtScope + " comparing to: " + scope.id)
               if (i.recoverAtScope == scope.id) {
-                println(
-                  "XXXX GOOD with scope id: " + i.recoverAtScope + " comparing to: " + scope.id)
+//                println(
+//                  "XXXX GOOD with scope id: " + i.recoverAtScope + " comparing to: " + scope.id)
                 s2.get[F2, O2]
               } else {
-                println(
-                  "XXXX BAD with scope id: " + i.recoverAtScope + " comparing to: " + scope.id)
+//                println(
+//                  "XXXX BAD with scope id: " + i.recoverAtScope + " comparing to: " + scope.id)
                 FreeC.Interrupted(i)
               }
           }
@@ -809,34 +809,48 @@ final class Stream[+F[_], +O] private (private val free: FreeC[Algebra[Nothing, 
     * }}}
     */
   def flatMap[F2[x] >: F[x], O2](f: O => Stream[F2, O2]): Stream[F2, O2] =
-    Stream.fromFreeC[F2, O2](Algebra.uncons(get[F2, O]).flatMap {
-      case Some((hd, tl)) =>
-        // nb: If tl is Pure, there's no need to propagate flatMap through the tail. Hence, we
-        // check if hd has only a single element, and if so, process it directly instead of folding.
-        // This allows recursive infinite streams of the form `def s: Stream[Pure,O] = Stream(o).flatMap { _ => s }`
-        val only: Option[O] = tl match {
-          case FreeC.Pure(_) => hd.head
-          case _             => None
-        }
-        only match {
-          case None =>
-            hd.map(a =>
-                Stream.fromFreeC(f(a).get[F2, O2].transformWith3 {
-                  case Either3.Right(right) => Algebra.pure(right)
-                  case Either3.Left(left)   => Algebra.raiseError(left)
-                  case Either3.Middle(i) =>
-                    println("XXB" + tl.asInterruptHandler(i).viewL.get)
-                    FreeC.Interrupted(i)
-                }))
-              .foldRightLazy(Stream.fromFreeC(tl).flatMap(f))(_ ++ _)
-              .get
+    Stream.fromFreeC[F2, O2](
+      Algebra
+        .uncons(get[F2, O])
+        .flatMap {
+          case Some((hd, tl)) =>
+            // nb: If tl is Pure, there's no need to propagate flatMap through the tail. Hence, we
+            // check if hd has only a single element, and if so, process it directly instead of folding.
+            // This allows recursive infinite streams of the form `def s: Stream[Pure,O] = Stream(o).flatMap { _ => s }`
+            val only: Option[O] = tl match {
+              case FreeC.Pure(_) => hd.head
+              case _             => None
+            }
+            only match {
+              case None =>
+                hd.map(f)
+                  .foldRightLazy(Stream.fromFreeC(tl).flatMap(f))(_ ++ _)
+                  .get[F2, O2]
+//                  .transformWith3 {
+//                    case Either3.Right(right) => Algebra.pure(right)
+//                    case Either3.Left(left)   => Algebra.raiseError(left)
+//                    case Either3.Middle(i)    =>
+////                      println("XXB" + Algebra.goThrough[F2, O2, O](i, get[F2, O]).viewL.get)
+//                      Algebra.goThrough[F2, O2, O](i, tl).map(_ => ())
+//                    //                    FreeC.Interrupted(i)
+//                  }
 
-          case Some(o) =>
-            f(o).get
+              case Some(o) =>
+                f(o)
+                  .get[F2, O2]
+//                  .transformWith3 {
+//                    case Either3.Right(right) => Algebra.pure(right)
+//                    case Either3.Left(left)   => Algebra.raiseError(left)
+//                    case Either3.Middle(i)    =>
+////                    println("XXB" + Algebra.goThrough[F2, O2, O](i, get[F2, O]).viewL.get)
+//                      Algebra.goThrough[F2, O2, O](i, tl).map(_ => ())
+//                    //                    FreeC.Interrupted(i)
+//                  }
 
+            }
+          case None => Stream.empty.get[F2, O2]
         }
-      case None => Stream.empty.get
-    })
+    )
 
   /** Alias for `flatMap(_ => s2)`. */
   def >>[F2[x] >: F[x], O2](s2: => Stream[F2, O2]): Stream[F2, O2] =

@@ -2,11 +2,10 @@ package fs2
 
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
-
 import org.typelevel.discipline.Laws
-import org.scalatest.{ Args, AsyncFreeSpec, FreeSpec, Matchers, Status, Suite }
-import org.scalatest.concurrent.{ AsyncTimeLimitedTests, TimeLimitedTests }
-import org.scalatest.prop.{ Checkers, GeneratorDrivenPropertyChecks }
+import org.scalatest.{Args, AsyncFreeSpec, FreeSpec, Matchers, Status, Suite}
+import org.scalatest.concurrent.{AsyncTimeLimitedTests, TimeLimitedTests}
+import org.scalatest.prop.{Checkers, GeneratorDrivenPropertyChecks}
 import org.scalatest.time.Span
 
 abstract class Fs2Spec extends FreeSpec with Fs2SpecLike with TimeLimitedTests with Checkers {

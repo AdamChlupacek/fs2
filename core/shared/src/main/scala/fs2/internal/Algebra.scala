@@ -127,18 +127,18 @@ private[fs2] object Algebra {
                               interruptible: Option[Concurrent[F]]): FreeC[Algebra[F, O, ?], Unit] =
     openScope(interruptible).flatMap {
       case None =>
-        println("XUXUXUXUXU none received...")
+//        println("XUXUXUXUXU none received...")
         pure(()) // in case of interruption the scope closure is handled by scope itself, before next step is returned
       case Some(scopeId) =>
-        println("XXXO running stream in scope" + scopeId)
+//        println("XXXO running stream in scope" + scopeId)
         s.transformWith3 {
           case Either3.Right(_) =>
-            println("XXXI closing with right: " + scopeId)
+//            println("XXXI closing with right: " + scopeId)
             closeScope(scopeId, interruptFallBack = false)
           case Either3.Middle(i) =>
             getScope[F, O, O].flatMap { c =>
-              println(
-                "XXXP closing scope in middle while rying to find" + c.id + " WHILE CLOSING COPE " + scopeId + " WHILE IN A SCOPE" + c.id)
+//              println(
+//                "XXXP closing scope in middle while rying to find" + c.id + " WHILE CLOSING COPE " + scopeId + " WHILE IN A SCOPE" + c.id)
               if (i.recoverAtScope == c.id) {
                 closeScope(scopeId, interruptFallBack = false)
               } else {
@@ -148,7 +148,7 @@ private[fs2] object Algebra {
             }
 
           case Either3.Left(err) =>
-            println("XXXI closing with err: " + scopeId)
+//            println("XXXI closing with err: " + scopeId)
             closeScope(scopeId, interruptFallBack = false).transformWith {
               case Right(_)   => raiseError(err)
               case Left(err0) => raiseError(CompositeFailure(err, err0, Nil))
@@ -178,54 +178,45 @@ private[fs2] object Algebra {
     : FreeC[Algebra[F, X, ?], Option[(Chunk[O], FreeC[Algebra[F, O, ?], Unit])]] =
     step(s, None).map { _.map { case (h, _, t) => (h, t) } }
 
-  def handleInterrupt[F[_], O](i: Interrupt,
-                               tl: FreeC[Algebra[F, O, ?], Any]): FreeC[Algebra[F, O, ?], Any] =
-    tl.viewL.get match {
-      case FreeC.Pure(_) => FreeC.Interrupted(i)
-      case FreeC.Fail(e) => Algebra.raiseError(e)
-
-      case bound: FreeC.Bind[Algebra[F, O, ?], y, Any] =>
+  def goThrough[F[_], O, X](
+      i: Interrupt,
+      st: FreeC[Algebra[F, X, ?], Any]
+  ): FreeC[Algebra[F, O, ?], Any] =
+    st.viewL.get match {
+      case FreeC.Pure(_)                               => FreeC.Interrupted(i)
+      case FreeC.Fail(e)                               => Algebra.raiseError(e)
+      case bound: FreeC.Bind[Algebra[F, X, ?], y, Any] =>
+//        println("THROUGH INTER" + bound)
         val f = bound.f
           .asInstanceOf[Either3[Throwable, Interrupt, Any] => FreeC[Algebra[F, O, ?], Unit]]
         val fx = bound.fx.asInstanceOf[FreeC.Eval[Algebra[F, O, ?], y]].fr
 
         fx match {
-//          case step: Algebra.Step[F, x, O] =>
-//            handleInterrupt[F, x](i, step.stream)
-//            .transformWith3[Unit] {
-//              case Either3.Right(out)  => f(Either3.Right(out))
-//              case Either3.Left(out)   => f(Either3.Left(out))
-//              case Either3.Middle(out) => f(Either3.Middle(out))
-//            }
-//
-//          case close: Algebra.CloseScope[F, O] =>
-//            Algebra
-//              .closeScope(close.scopeId, close.interruptFallback)
-//              .flatMap(out => FreeC.Interrupted[Algebra[F, O, ?], Unit](i).map(_ => out))
-//              .transformWith3(f)
+          case step: Algebra.Step[F, x, O] =>
+//            println(" STEPPING" + goThrough[F, O, x](i, step.stream).viewL.get)
+            goThrough[F, O, x](i, step.stream)
+              .transformWith3[Unit] {
+                case Either3.Right(_)    => f(Either3.Right(None))
+                case Either3.Left(out)   => f(Either3.Left(out))
+                case Either3.Middle(out) => f(Either3.Middle(out))
+              }
+
+          case close: Algebra.CloseScope[F, O] =>
+            Algebra
+              .closeScope[F, O](close.scopeId, close.interruptFallback)
+              .transformWith3(f)
 
           case _ => f(Either3.Middle(i))
         }
 
-//      case FreeC.Bind(FreeC.Eval(Algebra.Step(next, None)), k) =>
-//        handleInterrupt(i, next).transformWith3(k)
-//
-//      case FreeC.Bind(FreeC.Eval(Algebra.CloseScope(token, fallBack)), k) =>
-//        Algebra
-//          .closeScope(token, fallBack)
-//          .flatMap(out => FreeC.Interrupted(i).map(_ => out))
-//          .transformWith3(k)
-//
-//      case FreeC.Bind(_, k)     => k(Either3.Middle(i))
-      case FreeC.Eval(_)        => sys.error("impossible")
-      case FreeC.Interrupted(_) => sys.error("impossible")
+      case FreeC.Eval(_)        => sys.error("impossible 1")
+      case FreeC.Interrupted(_) => FreeC.Interrupted(i)
     }
 
   /** Left-folds the output of a stream. */
   def compile[F[_], O, B](stream: FreeC[Algebra[F, O, ?], Unit], init: B)(f: (B, O) => B)(
       implicit F: Sync[F]): F[B] =
     F.bracket(F.delay(CompileScope.newRoot[F, O])) { scope =>
-      println("XXXIU new rooot: " + scope.id)
       compileScope[F, O, B](scope, stream, init)(f)
     }(scope => scope.close.rethrow)
 
@@ -328,8 +319,56 @@ private[fs2] object Algebra {
                       // if we originally swapped scopes we want to return the original
                       // scope back to the go as that is the scope that is expected to be here.
                       val nextScope = u.scope.fold(outScope)(_ => scope)
+//                      println(
+//                        "SPL - EMITING OUT " + head + " ---: " + stepScope.id + ": " + outScope.id + ": --" + " TAIL" + tail.viewL.get)
+//
+//                      println(
+//                        "SPL -OMG " + head + " ---: " + stepScope.id + ": " + outScope.id + ": --" + tail
+//                          .asHandler(new Throwable("GO DIE"))
+//                          .viewL
+//                          .get + " -- " + f(Either3.Left(new Throwable("GO DIE2"))).viewL.get)
+
                       interruptGuard(
-                        go(nextScope, f(Either3.Right(Some((head, outScope.id, tail)))))
+                        go(
+                          nextScope,
+                          f(Either3.Right(Some((head, outScope.id, tail)))).transformWith3 {
+                            case Either3.Right(right) => Algebra.pure(right)
+                            case Either3.Left(left)   => Algebra.raiseError(left)
+                            case Either3.Middle(i)    =>
+//                              if (stepScope.id != nextScope.id) {
+//                                if (i.recoverAtScope == nextScope.id) {
+//                                  closeScope(nextScope.id, false)
+//                                    .flatMap(_ => f(Either3.Right(None)))
+//                                } else {
+//                                  closeScope(nextScope.id, false)
+//                                    .flatMap(_ => f(Either3.Middle(i)))
+//                                }
+//                              } else {
+//                                f(Either3.Middle(i))
+//                              }
+//                              println(
+//                                "SPL:  INTERRUPTED " + Algebra
+//                                  .goThrough[F, X, y](i, tail)
+//                                  .viewL
+//                                  .get)
+                              //                      println("XXB" + Algebra.goThrough[F2, O2, O](i, get[F2, O]).viewL.get)
+//                              if (i.recoverAtScope == nextScope.id) {
+//                                closeScope(nextScope.id, false)
+//                                  .flatMap(_ => f(Either3.Right(())))
+//                              } else {
+//                                closeScope(nextScope.id, false)
+//                                  .flatMap(_ => f(Either3.Middle(i)))
+//                              }
+
+                              Algebra.goThrough[F, X, y](i, tail).transformWith3 {
+                                case Either3.Right(_)  => f(Either3.Right(None))
+                                case Either3.Left(err) => Algebra.raiseError(err)
+                                case Either3.Middle(i) =>
+                                  Algebra.goThrough[F, X, X](i, f(Either3.Middle(i))).map(_ => ())
+                              }
+                            //                    FreeC.Interrupted(i)
+                          }
+                        )
                       )
                     case Right(Interrupted(scope, next)) => F.pure(Interrupted(scope, next))
                     case Right(OpenInterruptibly(scope, concurrent, onInterrupt, next)) =>
@@ -354,8 +393,8 @@ private[fs2] object Algebra {
                 case Left(Right(token)) =>
                   scope.whenInterrupted(token).flatMap {
                     case (scope0, _) =>
-                      println("XXIO gone:: " + f(Either3.Middle(Interrupt(scope0.id))))
-                      println("XXIO gone2:: " + f(Either3.Right(())))
+//                      println("XXIO gone:: " + f(Either3.Middle(Interrupt(scope0.id))).viewL.get)
+//                      println("XXIO gone2:: " + f(Either3.Right(())))
                       go[X](scope, f(Either3.Middle(Interrupt(scope0.id))))
                   }
               }
@@ -380,7 +419,7 @@ private[fs2] object Algebra {
                 open.interruptible match {
                   case None =>
                     F.flatMap(scope.open(None)) { childScope =>
-                      println("XXXC OPENED SCOPE" + childScope.id + "   PARENT: " + scope.id)
+//                      println("XXXC OPENED SCOPE" + childScope.id + "   PARENT: " + scope.id)
                       go(childScope, f(Either3.Right(Some(childScope.id))))
                     }
 
@@ -389,16 +428,16 @@ private[fs2] object Algebra {
                       scope.open(
                         Some((concurrent, FreeC.Fail(new Throwable("THIS SHOULD NOT HAPPEN!")))))) {
                       childScope =>
-                        println(
-                          "XXXC OPENED SCOPE INTERRUPT" + childScope.id + "   PARENT: " + scope.id)
+//                        println(
+//                          "XXXC OPENED SCOPE INTERRUPT" + childScope.id + "   PARENT: " + scope.id)
                         go(childScope, f(Either3.Right(Some(childScope.id))))
                     }
                 }
               }
 
             case close: Algebra.CloseScope[F, X] =>
-              println(
-                "XXXG trying to close scope: " + close.scopeId + " current scope: " + scope.id)
+//              println(
+//                "XXXG trying to close scope: " + close.scopeId + " current scope: " + scope.id)
               def closeAndGo(toClose: CompileScope[F, O]) =
                 F.flatMap(toClose.close) { r =>
                   F.flatMap(toClose.openAncestor) { ancestor =>

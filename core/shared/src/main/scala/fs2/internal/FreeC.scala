@@ -77,7 +77,7 @@ private[fs2] sealed abstract class FreeC[F[_], +R] {
     case Pure(_)        => Fail(e)
     case Fail(e2)       => Fail(e)
     case Bind(_, k)     => k(Either3.Left(e))
-    case Eval(_)        => sys.error("impossible")
+    case Eval(_)        => sys.error("impossible 3")
     case Interrupted(_) => Fail(e)
   }
 
@@ -85,8 +85,8 @@ private[fs2] sealed abstract class FreeC[F[_], +R] {
     case Pure(_)        => Interrupted(i)
     case Fail(e)        => Fail(e)
     case Bind(_, k)     => k(Either3.Middle(i))
-    case Eval(_)        => sys.error("impossible")
-    case Interrupted(_) => sys.error("impossible")
+    case Eval(_)        => sys.error("impossible 4")
+    case Interrupted(_) => sys.error("impossible 5")
   }
 
   def viewL: ViewL[F, R] = mkViewL(this)
@@ -98,7 +98,7 @@ private[fs2] sealed abstract class FreeC[F[_], +R] {
         Bind(fx.translate(f), (e: Either3[Throwable, Interrupt, Any]) => k(e).translate(f))
       case Fail(e)        => Fail(e)
       case Interrupted(i) => Interrupted(i)
-      case Eval(fx)       => sys.error("impossible")
+      case Eval(fx)       => sys.error("impossible 6")
     }
   }
 }
@@ -182,7 +182,7 @@ private[fs2] object FreeC {
           F.flatMap(F.attempt(fr.asInstanceOf[Eval[F, Any]].fr)) { e =>
             k(Either3.fromEither(e)).run
           }
-        case Eval(_)        => sys.error("impossible")
+        case Eval(_)        => sys.error("impossible 7")
         case Interrupted(i) => F.raiseError(i)
       }
   }
